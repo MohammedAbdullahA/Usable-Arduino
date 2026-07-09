@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Rig Controller</title>
+<style>
+  :root {
+    --bg: #121212;
+    --panel: #1e1e1e;
+    --panel-border: #333;
+    --text: #f0f0f0;
+    --text-dim: #a8a8a8;
+    --accent: #2d7dd2;
+    --accent-dim: #1f5a94;
+    --amber: #c98a12;
+    --green: #2ecc71;
+    --red: #d3352b;
+    --red-dark: #8b0000;
+  }
+
+  * , *::before, *::after { box-sizing: border-box; }
+
+  html { font-size: 18px; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  input {
+    font-family: inherit;
+  }
+
+  .unsupported {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 2rem;
+  }
+  body.no-serial .unsupported { display: flex; }
+  body.no-serial .app { display: none; }
+  .unsupported-box { max-width: 32rem; }
+  .unsupported-box h1 { color: var(--red); }
+
+  /* --- Header --- */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 600;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 1px solid var(--panel-border);
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 1.3rem; margin: 0; margin-right: auto; }
+
+  .status-pill {
+    padding: 0.5rem 1rem;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.95rem;
+    background: #444;
+  }
+  .status-pill.connecting { background: var(--amber); color: #111; }
+  .status-pill.connected { background: var(--green); color: #0a2b16; }
+  .status-pill.disconnected { background: #555; color: #eee; }
+
+  .btn-connect {
+    min-height: 60px;
+    min-width: 160px;
+    padding: 0.5rem 1.25rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    border-radius: 10px;
+    border: 2px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-connect:active { background: var(--accent-dim); }
+  .btn-connect.disconnect { background: #444; border-color: #666; }
+
+  /* --- Connect screen --- */
+  .connect-screen {
+    display: none;
+    min-height: 70vh;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 1.5rem;
+    text-align: center;
+    padding: 2rem;
+  }
+  body.state-disconnected .connect-screen { display: flex; }
+  body.state-disconnected .main-app { display: none; }
+  .connect-screen p { color: var(--text-dim); max-width: 34rem; font-size: 1.05rem; }
+  .btn-big-connect {
+    min-height: 100px;
+    min-width: 280px;
+    font-size: 1.4rem;
+    font-weight: 800;
+    border-radius: 14px;
+    border: 3px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-big-connect:active { background: var(--accent-dim); }
+
+  /* --- Banners --- */
+  .banner {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    font-weight: 700;
+    font-size: 1.1rem;
+    flex-wrap: wrap;
+  }
+  .banner.fault { background: #3a1010; border-bottom: 3px solid var(--red); color: #ffb3ab; }
+  .banner.lost { background: #3a2c10; border-bottom: 3px solid var(--amber); color: #ffd98a; }
+  body.state-fault .banner.fault { display: flex; }
+  body.state-lost .banner.lost { display: flex; }
+  .banner button {
+    min-height: 48px;
+    padding: 0.5rem 1.25rem;
+    border-radius: 8px;
+    border: 2px solid currentColor;
+    background: transparent;
+    color: inherit;
+    font-weight: 700;
+    font-size: 1rem;
+  }
+
+  /* --- Main layout --- */
+  .main-app { display: block; }
+  main {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1fr;
+    gap: 1rem;
+    padding: 1rem 1.25rem 1.25rem;
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+  .col { display: flex; flex-direction: column; gap: 1rem; }
+
+  .panel {
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+    background: var(--panel);
+  }
+  .panel h2 {
+    margin: 0 0 0.9rem;
+    font-size: 1.15rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .hint { color: var(--text-dim); font-size: 0.9rem; margin: 0.4rem 0 0.9rem; }
+
+  .field-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 0.4rem; font-size: 1rem; }
+
+  .num-input {
+    flex: 1;
+    min-height: 60px;
+    font-size: 1.3rem;
+    padding: 0.5rem 0.85rem;
+    border-radius: 10px;
+    border: 2px solid var(--panel-border);
+    background: #141414;
+    color: var(--text);
+  }
+  .num-input:focus { outline: none; border-color: var(--accent); }
+  .num-input.invalid { border-color: var(--red); }
+
+  .btn-sign {
+    min-width: 60px;
+    min-height: 60px;
+    font-size: 1.4rem;
+    font-weight: 800;
+    border-radius: 10px;
+    border: 2px solid var(--panel-border);
+    background: #262626;
+    color: var(--text);
+  }
+  .btn-sign:active { background: #333; }
+
+  .error-text {
+    color: var(--red);
+    font-size: 0.9rem;
+    min-height: 1.2em;
+    margin: -0.2rem 0 0.6rem;
+  }
+
+  .btn-action {
+    width: 100%;
+    min-height: 80px;
+    font-size: 1.25rem;
+    font-weight: 800;
+    border-radius: 12px;
+    border: 2px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-action:active:not(:disabled) { background: var(--accent-dim); }
+  .btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-action.amber { border-color: var(--amber); background: var(--amber); color: #1a1200; }
+  .btn-action.amber:active:not(:disabled) { background: #a3730f; }
+
+  /* --- Emergency stop ---
+     Lives inside the sticky header (not position:fixed) so it's always
+     visible without ever floating on top of — and hiding — other panel
+     content underneath it. */
+  .estop {
+    min-width: 180px;
+    min-height: 84px;
+    border-radius: 14px;
+    border: 4px solid #ff6b5f;
+    background: var(--red-dark);
+    color: #fff;
+    font-size: 1.25rem;
+    font-weight: 900;
+    letter-spacing: 0.03em;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5);
+  }
+  .estop:active { background: #5a0000; }
+  .estop:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* --- Status panel --- */
+  .status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+  }
+  .status-item {
+    background: #141414;
+    border-radius: 10px;
+    padding: 0.75rem;
+    border: 1px solid var(--panel-border);
+  }
+  .status-item .label { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 0.25rem; }
+  .status-item .value { font-size: 1.4rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .status-item.full { grid-column: 1 / -1; }
+  #stateItem.motion-idle .value { color: var(--green); }
+  #stateItem.motion-moving .value { color: var(--amber); }
+  #stateItem.motion-fault .value { color: var(--red); }
+
+  /* --- Advanced panel --- */
+  details.panel summary {
+    cursor: pointer;
+    font-size: 1.15rem;
+    font-weight: 700;
+    list-style: none;
+  }
+  details.panel summary::-webkit-details-marker { display: none; }
+  details.panel summary::before { content: "▸ "; }
+  details[open].panel summary::before { content: "▾ "; }
+  .adv-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+  .adv-grid label { font-size: 0.9rem; }
+  .adv-grid input {
+    width: 100%;
+    min-height: 54px;
+    font-size: 1.1rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 8px;
+    border: 2px solid var(--panel-border);
+    background: #141414;
+    color: var(--text);
+  }
+  .btn-apply {
+    min-height: 54px;
+    padding: 0 1.5rem;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 8px;
+    border: 2px solid var(--panel-border);
+    background: #262626;
+    color: var(--text);
+    margin-top: 1rem;
+  }
+
+  /* --- Log --- */
+  .log-panel { display: flex; flex-direction: column; min-height: 22rem; }
+  .log {
+    flex: 1;
+    overflow-y: auto;
+    background: #0c0c0c;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    padding: 0.6rem 0.75rem;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    max-height: 60vh;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-line.tx { color: #7ec8ff; }
+  .log-line.rx { color: #c8ffb0; }
+  .log-line.err { color: #ff9a90; }
+  .log-line.sys { color: var(--text-dim); }
+
+  /* --- Modal --- */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    padding: 1.5rem;
+    max-width: 26rem;
+    text-align: center;
+  }
+  .modal h3 { margin-top: 0; }
+  .modal-actions { display: flex; gap: 0.75rem; margin-top: 1.25rem; }
+  .modal-actions button {
+    flex: 1;
+    min-height: 64px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    border-radius: 10px;
+    border: 2px solid var(--panel-border);
+  }
+  .modal-actions .confirm { background: var(--amber); border-color: var(--amber); color: #1a1200; }
+  .modal-actions .cancel { background: #262626; color: var(--text); }
+</style>
+</head>
+<body class="no-serial state-disconnected">
+
+  <div class="unsupported">
+    <div class="unsupported-box">
+      <h1>Web Serial not available</h1>
+      <p>This browser doesn't support the Web Serial API. Open this page in <strong>Chrome</strong> or <strong>Edge</strong>.
+      On some Android devices/versions you may need to enable
+      <code>chrome://flags/#enable-experimental-web-platform-features</code>. See the project README for details.</p>
+    </div>
+  </div>
+
+  <div class="app">
+    <header>
+      <h1>Rig Controller</h1>
+      <span id="statusPill" class="status-pill disconnected">Disconnected</span>
+      <button id="connectBtn" class="btn-connect">Connect</button>
+      <button id="estopBtn" class="estop" disabled>EMERGENCY<br>STOP</button>
+    </header>
+
+    <div id="lostBanner" class="banner lost">
+      ⚠ Connection lost — attempting to reconnect requires tapping Connect again.
+    </div>
+    <div id="faultBanner" class="banner fault">
+      <span id="faultReason">⛔ FAULT — motion locked</span>
+      <button id="clearFaultBtn">Clear Fault</button>
+    </div>
+
+    <div class="connect-screen">
+      <h2>Connect to Arduino</h2>
+      <p>Plug the tablet into the Arduino Uno via a data-capable USB OTG cable, then tap Connect
+        and select the Arduino's serial port from the browser prompt.</p>
+      <button id="bigConnectBtn" class="btn-big-connect">Connect to Arduino</button>
+    </div>
+
+    <div class="main-app">
+      <main>
+        <div class="col">
+          <section class="panel">
+            <h2>Rotation (Motor 1)</h2>
+            <label for="rotateInput">Rotation angle (degrees)</label>
+            <div class="field-row">
+              <button type="button" class="btn-sign" data-sign-for="rotateInput">±</button>
+              <input id="rotateInput" class="num-input" type="text" inputmode="decimal"
+                     placeholder="e.g. 90" autocomplete="off">
+            </div>
+            <div id="rotateError" class="error-text"></div>
+            <p class="hint">Positive = clockwise, negative = counter-clockwise. Range −3600 to +3600°.</p>
+            <button id="rotateBtn" class="btn-action" disabled>Rotate</button>
+          </section>
+
+          <section class="panel">
+            <h2>Linear Axis (Motor 2)</h2>
+            <label for="linearInput">Linear steps</label>
+            <div class="field-row">
+              <button type="button" class="btn-sign" data-sign-for="linearInput">±</button>
+              <input id="linearInput" class="num-input" type="text" inputmode="numeric"
+                     placeholder="e.g. 30000" autocomplete="off">
+            </div>
+            <div id="linearError" class="error-text"></div>
+            <p class="hint">Positive = forward, negative = backward. Range −100000 to +100000 steps.</p>
+            <button id="linearBtn" class="btn-action" disabled>Move</button>
+          </section>
+
+          <section class="panel">
+            <h2>Home</h2>
+            <p class="hint">Returns both motors to position 0.</p>
+            <button id="homeBtn" class="btn-action amber" disabled>Home</button>
+          </section>
+        </div>
+
+        <div class="col">
+          <section class="panel">
+            <h2>Live Status</h2>
+            <div class="status-grid">
+              <div class="status-item">
+                <div class="label">Motor 1 (rotation)</div>
+                <div id="pos1Deg" class="value">0.0°</div>
+              </div>
+              <div class="status-item">
+                <div class="label">Motor 2 (linear)</div>
+                <div id="pos2Steps" class="value">0 steps</div>
+              </div>
+              <div id="stateItem" class="status-item full motion-idle">
+                <div class="label">Motion state</div>
+                <div id="motionState" class="value">IDLE</div>
+              </div>
+              <div class="status-item full">
+                <div class="label">Last command</div>
+                <div id="lastCommand" class="value" style="font-size:1rem;">—</div>
+              </div>
+            </div>
+          </section>
+
+          <details class="panel">
+            <summary>Advanced — speed &amp; acceleration</summary>
+            <div class="adv-grid">
+              <div>
+                <label for="speed1">Motor 1 max speed (steps/s)</label>
+                <input id="speed1" type="text" inputmode="decimal" placeholder="300">
+              </div>
+              <div>
+                <label for="accel1">Motor 1 acceleration (steps/s²)</label>
+                <input id="accel1" type="text" inputmode="decimal" placeholder="120">
+              </div>
+              <div>
+                <label for="speed2">Motor 2 max speed (steps/s)</label>
+                <input id="speed2" type="text" inputmode="decimal" placeholder="3000">
+              </div>
+              <div>
+                <label for="accel2">Motor 2 acceleration (steps/s²)</label>
+                <input id="accel2" type="text" inputmode="decimal" placeholder="1500">
+              </div>
+            </div>
+            <div id="advError" class="error-text"></div>
+            <button id="applyAdvBtn" class="btn-apply">Apply</button>
+          </details>
+        </div>
+
+        <div class="col">
+          <section class="panel log-panel">
+            <h2>Serial Log</h2>
+            <div id="log" class="log"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div id="homeModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>Confirm Home</h3>
+      <p>Return both Motor 1 and Motor 2 to position 0?</p>
+      <div class="modal-actions">
+        <button class="cancel" id="homeCancelBtn">Cancel</button>
+        <button class="confirm" id="homeConfirmBtn">Home</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const STEPS_PER_REV = 1600;
+  const ROTATE_MIN = -3600, ROTATE_MAX = 3600;
+  const LINEAR_MIN = -100000, LINEAR_MAX = 100000;
+  const SPEED_MAX = 20000, ACCEL_MAX = 20000;
+  const PING_INTERVAL_MS = 1000;
+  const MAX_LOG_LINES = 400;
+
+  if (!("serial" in navigator)) {
+    document.body.classList.add("no-serial");
+    return;
+  }
+
+  const el = (id) => document.getElementById(id);
+
+  const state = {
+    connected: false,
+    connecting: false,
+    busy: false,
+    fault: false,
+    pos1: 0,
+    pos2: 0,
+    lastCommand: "—",
+  };
+
+  let port = null;
+  let writer = null;
+  let reader = null;
+  let readBuffer = "";
+  let readLoopActive = false;
+  let pingTimer = null;
+
+  // ---------- Logging ----------
+  function appendLog(text, cls) {
+    const logEl = el("log");
+    const line = document.createElement("div");
+    line.className = "log-line " + (cls || "sys");
+    const ts = new Date().toLocaleTimeString([], { hour12: false });
+    line.textContent = "[" + ts + "] " + text;
+    logEl.appendChild(line);
+    while (logEl.childElementCount > MAX_LOG_LINES) {
+      logEl.removeChild(logEl.firstChild);
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ---------- Connection ----------
+  async function connect() {
+    state.connecting = true;
+    refreshUi();
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 9600 });
+
+      state.connected = true;
+      state.connecting = false;
+      state.fault = false;
+      document.body.classList.remove("state-lost", "state-fault");
+
+      appendLog("Connected", "sys");
+      readLoop();
+      startPing();
+      refreshUi();
+      send("STATUS");
+    } catch (err) {
+      state.connecting = false;
+      state.connected = false;
+      appendLog("Connect failed: " + err.message, "err");
+      refreshUi();
+    }
+  }
+
+  async function disconnect(lost) {
+    stopPing();
+    readLoopActive = false;
+    try { if (reader) await reader.cancel(); } catch (_) {}
+    try { if (writer) { writer.releaseLock(); } } catch (_) {}
+    try { if (port) await port.close(); } catch (_) {}
+    reader = null;
+    writer = null;
+    port = null;
+    state.connected = false;
+    state.connecting = false;
+    state.busy = false;
+    document.body.classList.toggle("state-lost", !!lost);
+    if (!lost) document.body.classList.remove("state-fault");
+    appendLog(lost ? "Connection lost" : "Disconnected", lost ? "err" : "sys");
+    refreshUi();
+  }
+
+  async function readLoop() {
+    readLoopActive = true;
+    const textDecoder = new TextDecoderStream();
+    const readableClosed = port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+
+    try {
+      while (readLoopActive) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        readBuffer += value;
+        const lines = readBuffer.split("\n");
+        readBuffer = lines.pop() || "";
+        for (const line of lines) {
+          handleLine(line.replace(/\r$/, ""));
+        }
+      }
+    } catch (err) {
+      appendLog("Read error: " + err.message, "err");
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+      readLoopActive = false;
+      try { await readableClosed; } catch (_) {}
+      if (state.connected) disconnect(true);
+    }
+  }
+
+  async function send(cmd) {
+    if (!port || !port.writable) return;
+    try {
+      writer = port.writable.getWriter();
+      await writer.write(new TextEncoder().encode(cmd + "\n"));
+    } catch (err) {
+      appendLog("Write error: " + err.message, "err");
+    } finally {
+      try { writer.releaseLock(); } catch (_) {}
+    }
+    if (cmd !== "PING" && cmd !== "STATUS") {
+      appendLog("→ " + cmd, "tx");
+      state.lastCommand = cmd;
+    }
+  }
+
+  function startPing() {
+    stopPing();
+    pingTimer = setInterval(() => send("PING"), PING_INTERVAL_MS);
+  }
+  function stopPing() {
+    if (pingTimer) clearInterval(pingTimer);
+    pingTimer = null;
+  }
+
+  // ---------- Incoming line handling ----------
+  function handleLine(line) {
+    if (!line) return;
+
+    if (line === "READY") {
+      appendLog("← READY", "rx");
+      return;
+    }
+    if (line.startsWith("POS ")) {
+      const parts = line.split(" ");
+      state.pos1 = parseInt(parts[1], 10) || 0;
+      state.pos2 = parseInt(parts[2], 10) || 0;
+      const motionState = parts[3] || "IDLE";
+      state.busy = motionState === "MOVING";
+      state.fault = motionState === "FAULT";
+      document.body.classList.toggle("state-fault", state.fault);
+      refreshUi();
+      return;
+    }
+    if (line.startsWith("OK ")) {
+      appendLog("← " + line, "rx");
+      return;
+    }
+    if (line.startsWith("DONE ")) {
+      appendLog("← " + line, "rx");
+      state.busy = false;
+      refreshUi();
+      return;
+    }
+    if (line === "BUSY") {
+      appendLog("← BUSY (rig already in motion)", "err");
+      return;
+    }
+    if (line.startsWith("ERROR ")) {
+      appendLog("← " + line, "err");
+      const reason = line.slice("ERROR ".length);
+      if (reason === "LIMIT_MIN" || reason === "LIMIT_MAX" || reason === "WATCHDOG_TIMEOUT" || reason === "FAULT_ACTIVE") {
+        state.fault = true;
+        state.busy = false;
+        document.body.classList.add("state-fault");
+        el("faultReason").textContent = "⛔ FAULT — " + reason.replace(/_/g, " ");
+      }
+      refreshUi();
+      return;
+    }
+    appendLog("← " + line, "rx");
+  }
+
+  // ---------- Validation ----------
+  function validateFloat(raw, min, max) {
+    if (raw === "" || raw === null) return { ok: false, msg: "Enter a value." };
+    const v = Number(raw);
+    if (Number.isNaN(v)) return { ok: false, msg: "Not a valid number." };
+    if (v < min || v > max) return { ok: false, msg: `Must be between ${min} and ${max}.` };
+    return { ok: true, value: v };
+  }
+  function validateInt(raw, min, max) {
+    if (raw === "" || raw === null) return { ok: false, msg: "Enter a value." };
+    if (!/^-?\d+$/.test(raw.trim())) return { ok: false, msg: "Whole numbers only." };
+    const v = parseInt(raw, 10);
+    if (v < min || v > max) return { ok: false, msg: `Must be between ${min} and ${max}.` };
+    return { ok: true, value: v };
+  }
+
+  function wireSignToggle(btnId, inputId) {
+    // Many Android numeric keyboards omit a minus key — this button
+    // guarantees negative values are always reachable.
+    document.querySelectorAll(`[data-sign-for="${inputId}"]`).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const input = el(inputId);
+        const v = input.value.trim();
+        if (v.startsWith("-")) input.value = v.slice(1);
+        else if (v.length) input.value = "-" + v;
+        else input.value = "-";
+        input.dispatchEvent(new Event("input"));
+        input.focus();
+      });
+    });
+  }
+  wireSignToggle("rotateInput", "rotateInput");
+  wireSignToggle("linearInput", "linearInput");
+
+  function setupLiveValidation(inputId, errorId, validator, min, max) {
+    el(inputId).addEventListener("input", () => {
+      const result = validator(el(inputId).value, min, max);
+      el(inputId).classList.toggle("invalid", !result.ok);
+      el(errorId).textContent = el(inputId).value === "" ? "" : (result.ok ? "" : result.msg);
+    });
+  }
+  setupLiveValidation("rotateInput", "rotateError", validateFloat, ROTATE_MIN, ROTATE_MAX);
+  setupLiveValidation("linearInput", "linearError", validateInt, LINEAR_MIN, LINEAR_MAX);
+
+  // ---------- Actions ----------
+  el("rotateBtn").addEventListener("click", () => {
+    const r = validateFloat(el("rotateInput").value, ROTATE_MIN, ROTATE_MAX);
+    if (!r.ok) { el("rotateError").textContent = r.msg; return; }
+    send("ROTATE " + r.value);
+  });
+
+  el("linearBtn").addEventListener("click", () => {
+    const r = validateInt(el("linearInput").value, LINEAR_MIN, LINEAR_MAX);
+    if (!r.ok) { el("linearError").textContent = r.msg; return; }
+    send("LINEAR " + r.value);
+  });
+
+  el("homeBtn").addEventListener("click", () => el("homeModal").classList.add("open"));
+  el("homeCancelBtn").addEventListener("click", () => el("homeModal").classList.remove("open"));
+  el("homeConfirmBtn").addEventListener("click", () => {
+    el("homeModal").classList.remove("open");
+    send("HOME");
+  });
+
+  el("estopBtn").addEventListener("click", () => send("STOP"));
+
+  el("clearFaultBtn").addEventListener("click", () => {
+    send("CLEAR");
+    state.fault = false;
+    document.body.classList.remove("state-fault");
+    refreshUi();
+  });
+
+  el("applyAdvBtn").addEventListener("click", () => {
+    const fields = [
+      { id: "speed1", cmd: "SET_SPEED_1", max: SPEED_MAX },
+      { id: "accel1", cmd: "SET_ACCEL_1", max: ACCEL_MAX },
+      { id: "speed2", cmd: "SET_SPEED_2", max: SPEED_MAX },
+      { id: "accel2", cmd: "SET_ACCEL_2", max: ACCEL_MAX },
+    ];
+    el("advError").textContent = "";
+    for (const f of fields) {
+      const raw = el(f.id).value.trim();
+      if (raw === "") continue;
+      const r = validateFloat(raw, 0.0001, f.max);
+      if (!r.ok) { el("advError").textContent = `${f.id}: ${r.msg}`; return; }
+    }
+    for (const f of fields) {
+      const raw = el(f.id).value.trim();
+      if (raw === "") continue;
+      send(f.cmd + " " + raw);
+    }
+  });
+
+  el("connectBtn").addEventListener("click", () => {
+    if (state.connected) disconnect(false); else connect();
+  });
+  el("bigConnectBtn").addEventListener("click", connect);
+
+  // ---------- UI refresh ----------
+  function refreshUi() {
+    document.body.classList.toggle("state-disconnected", !state.connected);
+
+    const pill = el("statusPill");
+    pill.classList.remove("connecting", "connected", "disconnected");
+    if (state.connecting) { pill.textContent = "Connecting…"; pill.classList.add("connecting"); }
+    else if (state.connected) { pill.textContent = "Connected"; pill.classList.add("connected"); }
+    else { pill.textContent = "Disconnected"; pill.classList.add("disconnected"); }
+
+    const connectBtn = el("connectBtn");
+    connectBtn.textContent = state.connected ? "Disconnect" : (state.connecting ? "Connecting…" : "Connect");
+    connectBtn.classList.toggle("disconnect", state.connected);
+    connectBtn.disabled = state.connecting;
+
+    const actionsEnabled = state.connected && !state.busy && !state.fault;
+    el("rotateBtn").disabled = !actionsEnabled;
+    el("linearBtn").disabled = !actionsEnabled;
+    el("homeBtn").disabled = !actionsEnabled;
+    el("estopBtn").disabled = !state.connected;
+
+    el("pos1Deg").textContent = (state.pos1 * 360 / STEPS_PER_REV).toFixed(1) + "°";
+    el("pos2Steps").textContent = state.pos2 + " steps";
+    el("lastCommand").textContent = state.lastCommand;
+
+    const stateItem = el("stateItem");
+    const motionEl = el("motionState");
+    stateItem.classList.remove("motion-idle", "motion-moving", "motion-fault");
+    if (state.fault) { motionEl.textContent = "FAULT"; stateItem.classList.add("motion-fault"); }
+    else if (state.busy) { motionEl.textContent = "MOVING"; stateItem.classList.add("motion-moving"); }
+    else { motionEl.textContent = "IDLE"; stateItem.classList.add("motion-idle"); }
+  }
+
+  refreshUi();
+})();
+</script>
+</body>
+</html>
