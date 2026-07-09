@@ -2,13 +2,13 @@
 
 Tablet-based control interface for a dual-stepper positioning rig, replacing the old autonomous 8-phase sequence with parametric, on-demand control. An Android tablet connects directly to an Arduino Uno R3 over USB and drives it from a browser page using the Web Serial API — no backend, no cloud, no app store.
 
-This repo is self-contained — no build step, no backend, no dependencies beyond the Arduino IDE and a browser.
+This repo is self-contained — no build step, no backend, no dependencies beyond the Arduino IDE and a browser. The web app lives at `index.html` in the repo root (not in a subfolder) specifically so it doubles as a zero-config GitHub Pages site — see [Live UI](#loading-the-web-app-on-the-tablet) below.
 
 ## Contents
 
 ```
+index.html                                   Tablet web app (single self-contained file, doubles as the GitHub Pages site)
 firmware/rig_controller/rig_controller.ino   Arduino firmware
-web/index.html                               Tablet web app (single self-contained file)
 docs/commands.md                             Full serial protocol reference
 ```
 
@@ -48,21 +48,21 @@ See [docs/commands.md](docs/commands.md) for the full protocol, including two ad
 
 ## Loading the web app on the tablet
 
-The web app is a single self-contained `web/index.html` — no build step, no dependencies.
+The web app is a single self-contained `index.html` at the repo root — no build step, no dependencies.
 
-### Option A — Local file on the tablet
+### Option A — GitHub Pages (already live)
 
-1. Copy `web/index.html` onto the tablet's storage (via USB file transfer, cloud drive, email — however is convenient).
+**https://mohammedabdullaha.github.io/Usable-Arduino/**
+
+GitHub Pages serves whatever is at the repo root of the deployed branch — since `index.html` lives there directly, the site *is* the control UI, no separate build/output folder to configure. Repo → Settings → Pages → Source: **Deploy from a branch**, branch **main**, folder **/ (root)**. Every push to `main` updates the live page within a minute or two. Just open that URL on the tablet in Chrome — HTTPS is automatic, which satisfies Web Serial's secure-context requirement.
+
+### Option B — Local file on the tablet
+
+1. Copy `index.html` onto the tablet's storage (via USB file transfer, cloud drive, email — however is convenient).
 2. Open it in **Chrome** (not the default Android browser if that's not Chrome/Edge).
-3. Chrome treats local `file://` pages as a secure context, so Web Serial works without a server. No internet required.
+3. Chrome treats local `file://` pages as a secure context, so Web Serial works without a server. No internet required — useful as a fallback if the workshop network is unreliable.
 
-### Option B — Static hosting on Vercel
-
-1. Import this repository into Vercel.
-2. Set **Root Directory** to `web`, framework preset **Other** (static — no build command needed).
-3. Open the deployed URL on the tablet in Chrome. HTTPS is automatic, which satisfies Web Serial's secure-context requirement.
-
-Either option produces the same experience — pick whichever is easier to keep updated for your workshop.
+Both options produce the same experience — GitHub Pages is easiest to keep updated (edit, push, done); the local file works with zero network dependency.
 
 ## Using it
 
