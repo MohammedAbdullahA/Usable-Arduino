@@ -9,13 +9,13 @@ This matches the protocol in the project brief, plus three small additions neede
 | Command | Parameters | Behavior |
 |---|---|---|
 | `ROTATE <degrees>` | signed float, e.g. `90`, `-45.5` | Rotate Motor 1 by the specified angle (relative move). Positive = CW, negative = CCW. Range: −3600 to +3600. Rejected with `BUSY` if a motion is already in progress, or `ERROR FAULT_ACTIVE` if the rig is faulted. |
-| `SPIN <rpm>` **(addition)** | signed float, non-zero, e.g. `30`, `-12.5` | Spin Motor 1 continuously at the given RPM (converted to steps/s via `STEPS_PER_REV`). Positive = CW, negative = CCW. Runs until `STOP` is sent — there is no target angle, so it never completes on its own. Rejected with `ERROR OUT_OF_RANGE` if the resulting speed exceeds 20000 steps/s, `BUSY` if a motion is already in progress, or `ERROR FAULT_ACTIVE` if the rig is faulted. |
+| `SPIN <rpm>` **(addition)** | signed float, non-zero, e.g. `30`, `-12.5` | Spin Motor 1 continuously at the given RPM (converted to steps/s via `STEPS_PER_REV`). Positive = CW, negative = CCW. Runs until `STOP` is sent — there is no target angle, so it never completes on its own. Rejected with `ERROR OUT_OF_RANGE` if the resulting speed exceeds 200000 steps/s, `BUSY` if a motion is already in progress, or `ERROR FAULT_ACTIVE` if the rig is faulted. Note: this ceiling is set well above the manufacturer's 3000 RPM spec (160000 steps/s at 3200 steps/rev) — the practical limit is the Uno's real achievable step rate (roughly 20-40 kHz with AccelStepper), not this check. |
 | `LINEAR <steps>` | signed integer, e.g. `30000`, `-15000` | Move Motor 2 by the specified step count (relative move). Positive = forward, negative = backward. Range: −100000 to +100000. Same `BUSY`/`FAULT_ACTIVE` rejection rules as `ROTATE`. |
 | `STOP` | — | Immediate halt of both motors. Always processed, even mid-fault or mid-motion. Does **not** set a fault — this is a deliberate operator action, and the rig accepts new commands right away afterward. |
 | `HOME` | — | Return both motors to absolute position 0. If both are already at 0, responds `DONE HOME` immediately. Subject to the same `BUSY`/`FAULT_ACTIVE` rules as motion commands. |
 | `STATUS` | — | Request an immediate `POS` response. Always processed, regardless of state. |
-| `SET_SPEED_1 <value>` | float, steps/s, `0 < value ≤ 20000` | Set Motor 1 max speed. Rejected with `BUSY` while a motion is in progress. |
-| `SET_SPEED_2 <value>` | float, steps/s, `0 < value ≤ 20000` | Set Motor 2 max speed. Same rule. |
+| `SET_SPEED_1 <value>` | float, steps/s, `0 < value ≤ 200000` | Set Motor 1 max speed. Rejected with `BUSY` while a motion is in progress. |
+| `SET_SPEED_2 <value>` | float, steps/s, `0 < value ≤ 200000` | Set Motor 2 max speed. Same rule. |
 | `SET_ACCEL_1 <value>` | float, steps/s², `0 < value ≤ 20000` | Set Motor 1 acceleration. Same rule. |
 | `SET_ACCEL_2 <value>` | float, steps/s², `0 < value ≤ 20000` | Set Motor 2 acceleration. Same rule. |
 | `PING` **(addition)** | — | No-op heartbeat. The brief's watchdog requirement mentions accepting "any command (or heartbeat ping)" to reset the timeout — this is that ping. The web UI sends it every second automatically; you don't need to send it manually. Responds `OK PING`. |
