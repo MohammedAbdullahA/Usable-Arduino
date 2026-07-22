@@ -19,12 +19,14 @@ docs/commands.md                             Full serial protocol reference
 | Controller | Arduino Uno R3 |
 | Tablet | Android, Chrome or Edge |
 | Connection | USB OTG cable, **data-capable** (not charge-only), tablet → Arduino USB-B |
-| Motor 1 (rotation) | DM860H driver — step=D2, dir=D3 — 1600 steps/rev, 300 steps/s max, 120 steps/s² accel |
+| Motor 1 (rotation) | DM860H driver — step=D9 (Timer1/OC1A), dir=D3 — 1600 steps/rev, 300 steps/s max, 120 steps/s² accel |
 | Motor 2 (linear) | step=D4, dir=D5 — 3000 steps/s max, 1500 steps/s² accel |
 | Limit switches | Linear axis MIN/MAX endpoints — D6, D7 (see wiring note below) |
 | Library | [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/) by Mike McCauley |
 
-**Wiring note on limit switches:** the Uno's only two true external-interrupt pins (D2/D3) are already used by Motor 1's step/dir signals, so the limit switches are wired to D6/D7 instead and serviced with AVR pin-change interrupts (`PCINT2`) — still a hardware interrupt, not a polling loop, just not the "INT0/INT1" pins. Wire each switch normally-open to ground; the firmware uses `INPUT_PULLUP` and treats `LOW` as triggered.
+**Wiring note on limit switches:** limit switches are wired to D6/D7 and serviced with AVR pin-change interrupts (`PCINT2`) — still a hardware interrupt, not a polling loop. Wire each switch normally-open to ground; the firmware uses `INPUT_PULLUP` and treats `LOW` as triggered.
+
+**Wiring note on Motor 1's STEP pin:** Motor 1's STEP signal is on D9 (Timer1's `OC1A`), not a plain digital pin — this is required for `SPIN`'s hardware-timer pulse generation (see `firmware/rig_controller/rig_controller.ino`'s header comment for why). `ROTATE`/`HOME` still work through AccelStepper on the same pin; only `SPIN` hands the pin to Timer1 directly.
 
 ## Safety (non-negotiable, hardware-enforced)
 

@@ -10,16 +10,26 @@
  * below at the point it's implemented.
  *
  * Wiring:
- *   Motor 1 (rotation, DM860H)  step=D2  dir=D3
+ *   Motor 1 (rotation, DM860H)  step=D9  dir=D3
  *   Motor 2 (linear)            step=D4  dir=D5
  *   Limit switch, linear MIN    D6  (to GND when triggered, INPUT_PULLUP)
  *   Limit switch, linear MAX    D7  (to GND when triggered, INPUT_PULLUP)
  *
- * Note on limit switch pins: the Uno's only two true external-interrupt
- * pins (INT0/INT1 = D2/D3) are already used by Motor 1. Limit switches
- * are wired to D6/D7 instead, using AVR pin-change interrupts (PCINT2)
- * so they still halt motion from a hardware interrupt, not a polling
- * loop — see the PCINT2_vect ISR below.
+ * Note on limit switch pins: D6/D7 are used instead of true external
+ * interrupts, via AVR pin-change interrupts (PCINT2) — see PCINT2_vect below.
+ *
+ * Motor 1 STEP is on D9 (Timer1's OC1A) rather than a plain digital pin.
+ * ROTATE/HOME still drive it through AccelStepper's normal digitalWrite-based
+ * stepping (fine for the speeds those need). SPIN instead hands the pin to
+ * Timer1 hardware waveform generation: AccelStepper's polling-loop stepping
+ * tops out somewhere in the low kHz on this MCU regardless of commanded RPM,
+ * while Timer1 toggling OC1A in CTC mode produces a pulse train timed
+ * entirely in hardware, reaching tens of kHz with no jitter and no CPU
+ * involvement once at cruise speed. A software ramp (updateSpinRamp) walks
+ * the timer's frequency up gradually so the motor still accelerates instead
+ * of being commanded to full speed instantly; a compare-match ISR counts
+ * completed pulses so position stays known for STATUS/POS. See cmdSpin,
+ * timer1StartSpin/timer1StopSpin, and updateSpinRamp for the implementation.
  */
 
 #include <AccelStepper.h>
@@ -28,7 +38,7 @@
 #include <math.h>
 
 // ─── Pins ────────────────────────────────────────────────────────────────
-const uint8_t MOTOR1_STEP_PIN = 2;
+const uint8_t MOTOR1_STEP_PIN = 9;  // Timer1 OC1A — required for hardware-driven SPIN
 const uint8_t MOTOR1_DIR_PIN  = 3;
 const uint8_t MOTOR2_STEP_PIN = 4;
 const uint8_t MOTOR2_DIR_PIN  = 5;
@@ -61,12 +71,6 @@ const unsigned long WATCHDOG_TIMEOUT_MS     = 5000;
 const unsigned long POS_BROADCAST_INTERVAL  = 250;
 const size_t        CMD_BUFFER_SIZE         = 64;
 
-// A relative move this large never completes in practice (at max speed it's
-// still tens of hours of runtime) — used to make SPIN a continuous rotation
-// that only ever ends via STOP, while reusing the existing move()/run()
-// machinery instead of a separate motion mode.
-const long SPIN_STEP_TARGET = 2000000000L;
-
 AccelStepper motor1(AccelStepper::DRIVER, MOTOR1_STEP_PIN, MOTOR1_DIR_PIN);
 AccelStepper motor2(AccelStepper::DRIVER, MOTOR2_STEP_PIN, MOTOR2_DIR_PIN);
 
@@ -77,6 +81,7 @@ bool movingMotor2 = false;
 bool faultActive = false;     // set by a limit switch or watchdog trip; requires CLEAR to resume
 unsigned long lastCommandMillis = 0;
 unsigned long lastBroadcastMillis = 0;
+float motor1AccelSetting = MOTOR1_ACCEL_DEF;  // mirrors motor1's AccelStepper accel so the hardware SPIN ramp can use the same value
 
 char cmdBuffer[CMD_BUFFER_SIZE];
 uint8_t bufIndex = 0;
@@ -84,6 +89,15 @@ char lastCommandText[CMD_BUFFER_SIZE];  // raw text of the command currently in 
 
 volatile bool limitMinTriggered = false;
 volatile bool limitMaxTriggered = false;
+
+// ─── Hardware-timer SPIN state (Timer1 drives D9/OC1A directly) ───────────
+volatile long spinStepPos = 0;   // steps accumulated by the ISR while spinningHW
+volatile bool spinPhase   = false;  // toggles each compare match; a full pulse completes every other one
+int8_t  spinDirection  = 0;      // +1 or -1 for the duration of the current spin
+bool    spinningHW     = false;  // true while Timer1 (not AccelStepper) is driving Motor 1
+float   spinTargetFreq = 0;      // Hz the ramp is walking toward
+float   spinCurrentFreq = 0;     // Hz currently loaded into the timer
+unsigned long spinRampLastMillis = 0;
 
 // ─── Limit switch interrupts (PCINT2 covers digital pins 0-7) ─────────────
 ISR(PCINT2_vect) {
@@ -96,6 +110,95 @@ void setupLimitInterrupts() {
   pinMode(LIMIT_MAX_PIN, INPUT_PULLUP);
   PCICR |= (1 << PCIE2);
   PCMSK2 |= (1 << PCINT22) | (1 << PCINT23);  // D6, D7
+}
+
+// ─── Timer1 hardware pulse generator for SPIN ─────────────────────────────
+// Counts a completed HIGH->LOW pulse every second compare-match toggle.
+ISR(TIMER1_COMPA_vect) {
+  spinPhase = !spinPhase;
+  if (!spinPhase) {
+    spinStepPos += spinDirection;
+  }
+}
+
+// Picks the smallest prescaler that keeps OCR1A in range for the requested
+// frequency, maximizing timer resolution at high speed.
+bool computeTimer1Config(float freqHz, uint16_t& ocrOut, uint8_t& csBitsOut) {
+  static const uint16_t PRESCALERS[] = {1, 8, 64, 256, 1024};
+  static const uint8_t  CS_BITS[]    = {
+    (1 << CS10),
+    (1 << CS11),
+    (1 << CS11) | (1 << CS10),
+    (1 << CS12),
+    (1 << CS12) | (1 << CS10)
+  };
+  for (uint8_t i = 0; i < 5; i++) {
+    long ocr = lround(F_CPU / (2.0 * PRESCALERS[i] * freqHz)) - 1;
+    if (ocr >= 1 && ocr <= 65535L) {
+      ocrOut = (uint16_t)ocr;
+      csBitsOut = CS_BITS[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+void timer1SetFrequency(float freqHz) {
+  uint16_t ocr;
+  uint8_t cs;
+  if (!computeTimer1Config(freqHz, ocr, cs)) return;  // out of representable range, leave timer as-is
+  TCCR1B = (1 << WGM12) | cs;
+  OCR1A = ocr;
+}
+
+void timer1StartSpin(float freqHz) {
+  pinMode(MOTOR1_STEP_PIN, OUTPUT);
+  digitalWrite(MOTOR1_STEP_PIN, LOW);
+  spinPhase = false;
+  noInterrupts();
+  spinStepPos = motor1.currentPosition();  // continue counting from wherever AccelStepper left off
+  interrupts();
+  TCNT1 = 0;
+  TCCR1A = (1 << COM1A0);  // toggle OC1A (D9) on compare match — pure hardware waveform, no ISR needed for the pulse itself
+  timer1SetFrequency(freqHz);
+  TIMSK1 |= (1 << OCIE1A);  // compare-match interrupt only used for step counting
+}
+
+void timer1StopSpin() {
+  TIMSK1 &= ~(1 << OCIE1A);
+  TCCR1A &= ~(1 << COM1A0);  // disconnect OC1A, hand the pin back to plain digital I/O
+  TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10));
+  digitalWrite(MOTOR1_STEP_PIN, LOW);
+  noInterrupts();
+  long finalPos = spinStepPos;
+  interrupts();
+  motor1.setCurrentPosition(finalPos);  // keep AccelStepper's position in sync for ROTATE/HOME/STATUS afterward
+}
+
+// Returns Motor 1's logical position regardless of which path is driving it.
+long motor1Position() {
+  if (!spinningHW) return motor1.currentPosition();
+  noInterrupts();
+  long pos = spinStepPos;
+  interrupts();
+  return pos;
+}
+
+// Walks the timer's frequency from 0 up to spinTargetFreq at motor1AccelSetting
+// (Hz/s) so SPIN still ramps like a normal move instead of jumping to full
+// speed instantly. Once cruise speed is reached this does nothing further —
+// steady-state SPIN is 100% hardware-timed with zero per-pulse CPU cost.
+void updateSpinRamp() {
+  if (spinCurrentFreq >= spinTargetFreq) return;
+  unsigned long now = millis();
+  float elapsedSec = (now - spinRampLastMillis) / 1000.0f;
+  if (elapsedSec < 0.01f) return;  // throttle register writes to ~100Hz during the ramp
+  spinRampLastMillis = now;
+
+  float freq = spinCurrentFreq + motor1AccelSetting * elapsedSec;
+  if (freq > spinTargetFreq) freq = spinTargetFreq;
+  spinCurrentFreq = freq;
+  timer1SetFrequency(freq);
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────
@@ -124,7 +227,8 @@ void loop() {
   checkWatchdog();
 
   if (!faultActive) {
-    motor1.run();
+    if (spinningHW) updateSpinRamp();
+    else motor1.run();
     motor2.run();
   }
 
@@ -255,10 +359,10 @@ void cmdRotate(char* argStr) {
 
 void cmdSpin(char* argStr) {
   // Addition beyond the original spec: continuous RPM-driven rotation for
-  // Motor 1, as an alternative to ROTATE's fixed-angle moves. Reuses the
-  // move()/run() motion path with an effectively-unreachable target
-  // (SPIN_STEP_TARGET) so the existing busy/watchdog/STOP handling applies
-  // unchanged — STOP is the only thing that ends a spin.
+  // Motor 1, as an alternative to ROTATE's fixed-angle moves. Drives D9
+  // directly from Timer1 hardware (see timer1StartSpin) instead of through
+  // AccelStepper's polling loop, since the loop's real achievable pulse rate
+  // tops out far below what's needed to approach the motor's rated speed.
   if (faultActive) { Serial.println(F("ERROR FAULT_ACTIVE")); return; }
   if (busy)         { Serial.println(F("BUSY")); return; }
 
@@ -272,14 +376,27 @@ void cmdSpin(char* argStr) {
     return;
   }
 
-  float speed = fabs(rpm) * STEPS_PER_REV / 60.0f;
-  if (speed > SPEED_MAX) {
+  float freq = fabs(rpm) * STEPS_PER_REV / 60.0f;
+  if (freq > SPEED_MAX) {
+    Serial.println(F("ERROR OUT_OF_RANGE"));
+    return;
+  }
+  uint16_t ocrCheck;
+  uint8_t csCheck;
+  if (!computeTimer1Config(freq, ocrCheck, csCheck)) {
     Serial.println(F("ERROR OUT_OF_RANGE"));
     return;
   }
 
-  motor1.setMaxSpeed(speed);
-  motor1.move(rpm > 0 ? SPIN_STEP_TARGET : -SPIN_STEP_TARGET);
+  spinDirection = (rpm > 0) ? 1 : -1;
+  digitalWrite(MOTOR1_DIR_PIN, rpm > 0 ? HIGH : LOW);
+
+  spinTargetFreq = freq;
+  spinCurrentFreq = 1.0f;  // start near zero rather than jumping straight to cruise speed
+  spinRampLastMillis = millis();
+  spinningHW = true;
+  timer1StartSpin(spinCurrentFreq);
+
   busy = true;
   movingMotor1 = true;
   movingMotor2 = false;
@@ -362,6 +479,7 @@ void cmdSetAccel(AccelStepper& motor, char* argStr) {
   }
 
   motor.setAcceleration(value);
+  if (&motor == &motor1) motor1AccelSetting = value;  // keeps the hardware SPIN ramp in sync
   Serial.print(F("OK "));
   Serial.println(lastCommandText);
 }
@@ -370,6 +488,10 @@ void cmdSetAccel(AccelStepper& motor, char* argStr) {
 void emergencyHalt() {
   // Immediate stop, not a decelerated one: force distanceToGo() to zero so
   // run() issues no further steps starting the very next loop() iteration.
+  if (spinningHW) {
+    timer1StopSpin();
+    spinningHW = false;
+  }
   motor1.setSpeed(0);
   motor1.moveTo(motor1.currentPosition());
   motor2.setSpeed(0);
@@ -400,6 +522,7 @@ void checkWatchdog() {
 // ─── Motion completion + status broadcast ─────────────────────────────────
 void handleMotionCompletion() {
   if (!busy) return;
+  if (spinningHW) return;  // hardware SPIN never completes on its own — only STOP ends it
 
   bool m1Done = !movingMotor1 || motor1.distanceToGo() == 0;
   bool m2Done = !movingMotor2 || motor2.distanceToGo() == 0;
@@ -416,7 +539,7 @@ void handleMotionCompletion() {
 void sendStatusLine() {
   const char* state = faultActive ? "FAULT" : (busy ? "MOVING" : "IDLE");
   Serial.print(F("POS "));
-  Serial.print(motor1.currentPosition());
+  Serial.print(motor1Position());
   Serial.print(' ');
   Serial.print(motor2.currentPosition());
   Serial.print(' ');
