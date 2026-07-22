@@ -48,7 +48,7 @@ const uint8_t LIMIT_MAX_PIN   = 7;
 // ─── Motor defaults (preserved from the original autonomous sketch) ───────
 const float STEPS_PER_REV        = 400.0f;
 const float MOTOR1_MAX_SPEED_DEF = 300.0f;
-const float MOTOR1_ACCEL_DEF     = 3000.0f;
+const float MOTOR1_ACCEL_DEF     = 20000.0f;  // ACCEL_MAX — ramps through any resonance band as fast as possible by default
 const float MOTOR2_MAX_SPEED_DEF = 3000.0f;
 const float MOTOR2_ACCEL_DEF     = 1500.0f;
 
