@@ -19,7 +19,7 @@ docs/commands.md                             Full serial protocol reference
 | Controller | Arduino Uno R3 |
 | Tablet | Android, Chrome or Edge |
 | Connection | USB OTG cable, **data-capable** (not charge-only), tablet → Arduino USB-B |
-| Motor 1 (rotation) | DM860H driver — step=D2, dir=D3 — 1600 steps/rev, 300 steps/s max, 120 steps/s² accel |
+| Motor 1 (rotation) | DM860H driver — step=D2, dir=D3 — 400 steps/rev, 300 steps/s max, 120 steps/s² accel |
 | Motor 2 (linear) | step=D4, dir=D5 — 3000 steps/s max, 1500 steps/s² accel |
 | Limit switches | Linear axis MIN/MAX endpoints — D6, D7 (see wiring note below) |
 | Library | [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/) by Mike McCauley |
@@ -68,8 +68,8 @@ Both options produce the same experience — GitHub Pages is easiest to keep upd
 
 1. Plug the tablet into the Arduino via the OTG cable.
 2. Open the page, tap **Connect**, and select the Arduino's port from the browser's picker.
-3. Enter a rotation angle or linear step count and tap **Rotate** / **Move**. Use the **±** button next to each field if your tablet's keyboard doesn't show a minus key (common on Android numeric keypads).
-4. **Home** asks for confirmation before moving. **Rotate**, **Move**, and **Emergency Stop** execute immediately, no confirmation.
+3. Enter a rotation speed (RPM) or linear step count and tap **Spin** / **Move**. **Spin** rotates Motor 1 continuously at that RPM until **Emergency Stop** is pressed. Use the **±** button next to each field if your tablet's keyboard doesn't show a minus key (common on Android numeric keypads).
+4. **Home** asks for confirmation before moving. **Spin**, **Move**, and **Emergency Stop** execute immediately, no confirmation.
 5. If a limit switch trips or the watchdog times out, a fault banner appears — tap **Clear Fault** once it's safe to resume.
 6. The Serial Log panel shows every command sent and every response received, useful for training and debugging.
 
