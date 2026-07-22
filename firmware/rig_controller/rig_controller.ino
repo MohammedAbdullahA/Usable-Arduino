@@ -55,6 +55,12 @@ const unsigned long WATCHDOG_TIMEOUT_MS     = 5000;
 const unsigned long POS_BROADCAST_INTERVAL  = 250;
 const size_t        CMD_BUFFER_SIZE         = 64;
 
+// A relative move this large never completes in practice (at max speed it's
+// still tens of hours of runtime) — used to make SPIN a continuous rotation
+// that only ever ends via STOP, while reusing the existing move()/run()
+// machinery instead of a separate motion mode.
+const long SPIN_STEP_TARGET = 2000000000L;
+
 AccelStepper motor1(AccelStepper::DRIVER, MOTOR1_STEP_PIN, MOTOR1_DIR_PIN);
 AccelStepper motor2(AccelStepper::DRIVER, MOTOR2_STEP_PIN, MOTOR2_DIR_PIN);
 
@@ -190,6 +196,8 @@ void processCommand(char* line) {
     Serial.println(F("OK CLEAR"));
   } else if (strcmp(command, "ROTATE") == 0) {
     cmdRotate(argStr);
+  } else if (strcmp(command, "SPIN") == 0) {
+    cmdSpin(argStr);
   } else if (strcmp(command, "LINEAR") == 0) {
     cmdLinear(argStr);
   } else if (strcmp(command, "HOME") == 0) {
@@ -231,6 +239,41 @@ void cmdRotate(char* argStr) {
 
   long steps = lround((double)degrees * STEPS_PER_REV / 360.0);
   motor1.move(steps);
+  busy = true;
+  movingMotor1 = true;
+  movingMotor2 = false;
+
+  Serial.print(F("OK "));
+  Serial.println(lastCommandText);
+}
+
+void cmdSpin(char* argStr) {
+  // Addition beyond the original spec: continuous RPM-driven rotation for
+  // Motor 1, as an alternative to ROTATE's fixed-angle moves. Reuses the
+  // move()/run() motion path with an effectively-unreachable target
+  // (SPIN_STEP_TARGET) so the existing busy/watchdog/STOP handling applies
+  // unchanged — STOP is the only thing that ends a spin.
+  if (faultActive) { Serial.println(F("ERROR FAULT_ACTIVE")); return; }
+  if (busy)         { Serial.println(F("BUSY")); return; }
+
+  float rpm;
+  if (!parseFloatArg(argStr, &rpm)) {
+    Serial.println(F("ERROR INVALID_PARAM"));
+    return;
+  }
+  if (rpm == 0) {
+    Serial.println(F("ERROR OUT_OF_RANGE"));
+    return;
+  }
+
+  float speed = fabs(rpm) * STEPS_PER_REV / 60.0f;
+  if (speed > SPEED_MAX) {
+    Serial.println(F("ERROR OUT_OF_RANGE"));
+    return;
+  }
+
+  motor1.setMaxSpeed(speed);
+  motor1.move(rpm > 0 ? SPIN_STEP_TARGET : -SPIN_STEP_TARGET);
   busy = true;
   movingMotor1 = true;
   movingMotor2 = false;
