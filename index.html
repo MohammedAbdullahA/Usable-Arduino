@@ -403,15 +403,15 @@
         <div class="col">
           <section class="panel">
             <h2>Rotation (Motor 1)</h2>
-            <label for="rotateInput">Rotation angle (degrees)</label>
+            <label for="rotateInput">Rotation speed (RPM)</label>
             <div class="field-row">
               <button type="button" class="btn-sign" data-sign-for="rotateInput">±</button>
               <input id="rotateInput" class="num-input" type="text" inputmode="decimal"
-                     placeholder="e.g. 90" autocomplete="off">
+                     placeholder="e.g. 30" autocomplete="off">
             </div>
             <div id="rotateError" class="error-text"></div>
-            <p class="hint">Positive = clockwise, negative = counter-clockwise. Range −3600 to +3600°.</p>
-            <button id="rotateBtn" class="btn-action" disabled>Rotate</button>
+            <p class="hint">Positive = clockwise, negative = counter-clockwise. Spins continuously until Emergency Stop is pressed.</p>
+            <button id="rotateBtn" class="btn-action" disabled>Spin</button>
           </section>
 
           <section class="panel">
@@ -508,9 +508,9 @@
   "use strict";
 
   const STEPS_PER_REV = 1600;
-  const ROTATE_MIN = -3600, ROTATE_MAX = 3600;
   const LINEAR_MIN = -100000, LINEAR_MAX = 100000;
   const SPEED_MAX = 20000, ACCEL_MAX = 20000;
+  const RPM_MAX = SPEED_MAX * 60 / STEPS_PER_REV; // matches the firmware's SPIN speed ceiling
   const PING_INTERVAL_MS = 1000;
   const MAX_LOG_LINES = 400;
 
@@ -712,6 +712,12 @@
     if (v < min || v > max) return { ok: false, msg: `Must be between ${min} and ${max}.` };
     return { ok: true, value: v };
   }
+  function validateRpm(raw, min, max) {
+    const r = validateFloat(raw, min, max);
+    if (!r.ok) return r;
+    if (r.value === 0) return { ok: false, msg: "Must be non-zero." };
+    return r;
+  }
 
   function wireSignToggle(btnId, inputId) {
     // Many Android numeric keyboards omit a minus key — this button
@@ -738,14 +744,14 @@
       el(errorId).textContent = el(inputId).value === "" ? "" : (result.ok ? "" : result.msg);
     });
   }
-  setupLiveValidation("rotateInput", "rotateError", validateFloat, ROTATE_MIN, ROTATE_MAX);
+  setupLiveValidation("rotateInput", "rotateError", validateRpm, -RPM_MAX, RPM_MAX);
   setupLiveValidation("linearInput", "linearError", validateInt, LINEAR_MIN, LINEAR_MAX);
 
   // ---------- Actions ----------
   el("rotateBtn").addEventListener("click", () => {
-    const r = validateFloat(el("rotateInput").value, ROTATE_MIN, ROTATE_MAX);
+    const r = validateRpm(el("rotateInput").value, -RPM_MAX, RPM_MAX);
     if (!r.ok) { el("rotateError").textContent = r.msg; return; }
-    send("ROTATE " + r.value);
+    send("SPIN " + r.value);
   });
 
   el("linearBtn").addEventListener("click", () => {

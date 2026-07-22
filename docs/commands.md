@@ -9,6 +9,7 @@ This matches the protocol in the project brief, plus three small additions neede
 | Command | Parameters | Behavior |
 |---|---|---|
 | `ROTATE <degrees>` | signed float, e.g. `90`, `-45.5` | Rotate Motor 1 by the specified angle (relative move). Positive = CW, negative = CCW. Range: −3600 to +3600. Rejected with `BUSY` if a motion is already in progress, or `ERROR FAULT_ACTIVE` if the rig is faulted. |
+| `SPIN <rpm>` **(addition)** | signed float, non-zero, e.g. `30`, `-12.5` | Spin Motor 1 continuously at the given RPM (converted to steps/s via `STEPS_PER_REV`). Positive = CW, negative = CCW. Runs until `STOP` is sent — there is no target angle, so it never completes on its own. Rejected with `ERROR OUT_OF_RANGE` if the resulting speed exceeds 20000 steps/s, `BUSY` if a motion is already in progress, or `ERROR FAULT_ACTIVE` if the rig is faulted. |
 | `LINEAR <steps>` | signed integer, e.g. `30000`, `-15000` | Move Motor 2 by the specified step count (relative move). Positive = forward, negative = backward. Range: −100000 to +100000. Same `BUSY`/`FAULT_ACTIVE` rejection rules as `ROTATE`. |
 | `STOP` | — | Immediate halt of both motors. Always processed, even mid-fault or mid-motion. Does **not** set a fault — this is a deliberate operator action, and the rig accepts new commands right away afterward. |
 | `HOME` | — | Return both motors to absolute position 0. If both are already at 0, responds `DONE HOME` immediately. Subject to the same `BUSY`/`FAULT_ACTIVE` rules as motion commands. |
@@ -45,7 +46,9 @@ This matches the protocol in the project brief, plus three small additions neede
 
 ## Notes on the "one axis at a time" model
 
-The rig only moves one axis at a time — this mirrors the original autonomous sequence, which never ran both motors simultaneously. `busy` is a single global flag: any `ROTATE`, `LINEAR`, or `HOME` in progress rejects a second motion command with `BUSY`, regardless of which motor it targets.
+The rig only moves one axis at a time — this mirrors the original autonomous sequence, which never ran both motors simultaneously. `busy` is a single global flag: any `ROTATE`, `SPIN`, `LINEAR`, or `HOME` in progress rejects a second motion command with `BUSY`, regardless of which motor it targets.
+
+`SPIN` shares Motor 1 with `ROTATE` and follows the same busy-gating rules; the difference is only in what ends the motion — `ROTATE` finishes on its own once the target angle is reached, `SPIN` only ever ends via `STOP` (or a fault).
 
 ## Example session
 
