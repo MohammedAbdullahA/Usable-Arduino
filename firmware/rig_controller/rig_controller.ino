@@ -36,7 +36,7 @@ const uint8_t LIMIT_MIN_PIN   = 6;
 const uint8_t LIMIT_MAX_PIN   = 7;
 
 // ─── Motor defaults (preserved from the original autonomous sketch) ───────
-const float STEPS_PER_REV        = 1600.0f;
+const float STEPS_PER_REV        = 3200.0f;
 const float MOTOR1_MAX_SPEED_DEF = 300.0f;
 const float MOTOR1_ACCEL_DEF     = 120.0f;
 const float MOTOR2_MAX_SPEED_DEF = 3000.0f;
@@ -47,7 +47,13 @@ const float ROTATE_DEG_MIN   = -3600.0f;
 const float ROTATE_DEG_MAX   =  3600.0f;
 const long  LINEAR_STEPS_MIN = -100000L;
 const long  LINEAR_STEPS_MAX =  100000L;
-const float SPEED_MAX        = 20000.0f;  // generous upper bound, both motors
+// SPEED_MAX no longer reflects a real safety ceiling — it's set high enough
+// that 3000 RPM (the manufacturer spec, 160000 steps/s at 3200 steps/rev)
+// clears validation. AccelStepper on an Uno is software-timed, though: its
+// real achievable step rate tops out far below that (roughly 20-40 kHz in
+// practice), so requests near the manufacturer figure are expected to be
+// throughput-limited by the MCU, not rejected by this check.
+const float SPEED_MAX        = 200000.0f;
 const float ACCEL_MAX        = 20000.0f;
 
 // ─── Protocol / timing ──────────────────────────────────────────────────
