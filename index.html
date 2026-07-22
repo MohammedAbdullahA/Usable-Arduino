@@ -510,7 +510,6 @@
   const STEPS_PER_REV = 1600;
   const LINEAR_MIN = -100000, LINEAR_MAX = 100000;
   const SPEED_MAX = 20000, ACCEL_MAX = 20000;
-  const RPM_MAX = SPEED_MAX * 60 / STEPS_PER_REV; // matches the firmware's SPIN speed ceiling
   const PING_INTERVAL_MS = 1000;
   const MAX_LOG_LINES = 400;
 
@@ -712,11 +711,14 @@
     if (v < min || v > max) return { ok: false, msg: `Must be between ${min} and ${max}.` };
     return { ok: true, value: v };
   }
-  function validateRpm(raw, min, max) {
-    const r = validateFloat(raw, min, max);
-    if (!r.ok) return r;
-    if (r.value === 0) return { ok: false, msg: "Must be non-zero." };
-    return r;
+  function validateRpm(raw) {
+    // No UI-side ceiling — the firmware is the authority on the real
+    // hardware speed limit and rejects out-of-range values on its own.
+    if (raw === "" || raw === null) return { ok: false, msg: "Enter a value." };
+    const v = Number(raw);
+    if (Number.isNaN(v)) return { ok: false, msg: "Not a valid number." };
+    if (v === 0) return { ok: false, msg: "Must be non-zero." };
+    return { ok: true, value: v };
   }
 
   function wireSignToggle(btnId, inputId) {
@@ -744,12 +746,12 @@
       el(errorId).textContent = el(inputId).value === "" ? "" : (result.ok ? "" : result.msg);
     });
   }
-  setupLiveValidation("rotateInput", "rotateError", validateRpm, -RPM_MAX, RPM_MAX);
+  setupLiveValidation("rotateInput", "rotateError", validateRpm);
   setupLiveValidation("linearInput", "linearError", validateInt, LINEAR_MIN, LINEAR_MAX);
 
   // ---------- Actions ----------
   el("rotateBtn").addEventListener("click", () => {
-    const r = validateRpm(el("rotateInput").value, -RPM_MAX, RPM_MAX);
+    const r = validateRpm(el("rotateInput").value);
     if (!r.ok) { el("rotateError").textContent = r.msg; return; }
     send("SPIN " + r.value);
   });
