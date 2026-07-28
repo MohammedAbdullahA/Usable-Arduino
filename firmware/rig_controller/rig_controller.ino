@@ -27,9 +27,12 @@
  * entirely in hardware, reaching tens of kHz with no jitter and no CPU
  * involvement once at cruise speed. A software ramp (updateSpinRamp) walks
  * the timer's frequency up gradually so the motor still accelerates instead
- * of being commanded to full speed instantly; a compare-match ISR counts
- * completed pulses so position stays known for STATUS/POS. See cmdSpin,
- * timer1StartSpin/timer1StopSpin, and updateSpinRamp for the implementation.
+ * of being commanded to full speed instantly. Position during SPIN is
+ * integrated in software from frequency x elapsed time (updateSpinPosition):
+ * at 8x/16x microstepping the pulse rate reaches tens of kHz, so a per-pulse
+ * counting ISR would saturate the CPU — the old TIMER1_COMPA counting ISR
+ * has been removed for that reason. See cmdSpin, timer1StartSpin/
+ * timer1StopSpin, updateSpinRamp, and updateSpinPosition.
  */
 
 #include <AccelStepper.h>
@@ -46,9 +49,18 @@ const uint8_t LIMIT_MIN_PIN   = 6;
 const uint8_t LIMIT_MAX_PIN   = 7;
 
 // ─── Motor defaults (preserved from the original autonomous sketch) ───────
-const float STEPS_PER_REV        = 400.0f;
-const float MOTOR1_MAX_SPEED_DEF = 300.0f;
-const float MOTOR1_ACCEL_DEF     = 20000.0f;  // ACCEL_MAX — ramps through any resonance band as fast as possible by default
+// STEPS_PER_REV must match the DM860H's DIP-switch pulses/rev setting.
+// Changed 400 -> 1600 (8x microstepping): on the usual DM860H table that is
+// SW5-8 = ON OFF ON ON, but VERIFY against the table printed on your driver
+// (clone tables differ), and power-cycle the driver after changing switches.
+// 2x microstepping delivers coarse discrete torque impulses that pump the
+// unloaded rotor's mid-band resonance — the buzzing/desync at ~600-700 RPM.
+// 8x smooths the torque waveform and suppresses that resonance.
+const float STEPS_PER_REV        = 1600.0f;
+// Speed/accel values below are in steps (microsteps), so they're scaled x4
+// along with STEPS_PER_REV to keep the physical RPM / rev/s^2 unchanged.
+const float MOTOR1_MAX_SPEED_DEF = 1200.0f;
+const float MOTOR1_ACCEL_DEF     = 80000.0f;  // = ACCEL_MAX — ramps through any resonance band as fast as possible by default
 const float MOTOR2_MAX_SPEED_DEF = 3000.0f;
 const float MOTOR2_ACCEL_DEF     = 1500.0f;
 
@@ -64,7 +76,7 @@ const long  LINEAR_STEPS_MAX =  100000L;
 // practice), so requests near the manufacturer figure are expected to be
 // throughput-limited by the MCU, not rejected by this check.
 const float SPEED_MAX        = 200000.0f;
-const float ACCEL_MAX        = 20000.0f;
+const float ACCEL_MAX        = 80000.0f;  // scaled x4 with STEPS_PER_REV (same physical rev/s^2 ceiling as before)
 
 // ─── Protocol / timing ──────────────────────────────────────────────────
 const unsigned long WATCHDOG_TIMEOUT_MS     = 5000;
@@ -91,8 +103,13 @@ volatile bool limitMinTriggered = false;
 volatile bool limitMaxTriggered = false;
 
 // ─── Hardware-timer SPIN state (Timer1 drives D9/OC1A directly) ───────────
-volatile long spinStepPos = 0;   // steps accumulated by the ISR while spinningHW
-volatile bool spinPhase   = false;  // toggles each compare match; a full pulse completes every other one
+// No per-pulse ISR: position is integrated from frequency x time by
+// updateSpinPosition(). Display-grade accuracy, which is all continuous
+// rotation needs — and it costs nothing per pulse, so 8x/16x microstep
+// rates (tens of kHz) don't load the CPU at all.
+long  spinStepPos   = 0;         // integrated step position while spinningHW
+float spinStepFrac  = 0;         // fractional-step remainder of the integrator
+unsigned long spinPosLastMicros = 0;
 int8_t  spinDirection  = 0;      // +1 or -1 for the duration of the current spin
 bool    spinningHW     = false;  // true while Timer1 (not AccelStepper) is driving Motor 1
 float   spinTargetFreq = 0;      // Hz the ramp is walking toward
@@ -113,14 +130,6 @@ void setupLimitInterrupts() {
 }
 
 // ─── Timer1 hardware pulse generator for SPIN ─────────────────────────────
-// Counts a completed HIGH->LOW pulse every second compare-match toggle.
-ISR(TIMER1_COMPA_vect) {
-  spinPhase = !spinPhase;
-  if (!spinPhase) {
-    spinStepPos += spinDirection;
-  }
-}
-
 // Picks the smallest prescaler that keeps OCR1A in range for the requested
 // frequency, maximizing timer resolution at high speed.
 bool computeTimer1Config(float freqHz, uint16_t& ocrOut, uint8_t& csBitsOut) {
@@ -147,41 +156,52 @@ void timer1SetFrequency(float freqHz) {
   uint16_t ocr;
   uint8_t cs;
   if (!computeTimer1Config(freqHz, ocr, cs)) return;  // out of representable range, leave timer as-is
+  noInterrupts();
   TCCR1B = (1 << WGM12) | cs;
   OCR1A = ocr;
+  // If the counter has already passed the new (smaller) OCR value, CTC mode
+  // would run all the way to 65535 before matching again — a multi-ms dead
+  // gap in the pulse train on every ramp update. Reset the count instead;
+  // worst case that stretches one pulse slightly, which the motor never sees.
+  if (TCNT1 > ocr) TCNT1 = 0;
+  interrupts();
 }
 
 void timer1StartSpin(float freqHz) {
   pinMode(MOTOR1_STEP_PIN, OUTPUT);
   digitalWrite(MOTOR1_STEP_PIN, LOW);
-  spinPhase = false;
-  noInterrupts();
   spinStepPos = motor1.currentPosition();  // continue counting from wherever AccelStepper left off
-  interrupts();
+  spinStepFrac = 0;
+  spinPosLastMicros = micros();
   TCNT1 = 0;
-  TCCR1A = (1 << COM1A0);  // toggle OC1A (D9) on compare match — pure hardware waveform, no ISR needed for the pulse itself
+  TCCR1A = (1 << COM1A0);  // toggle OC1A (D9) on compare match — pure hardware waveform, no ISR involved at all
   timer1SetFrequency(freqHz);
-  TIMSK1 |= (1 << OCIE1A);  // compare-match interrupt only used for step counting
 }
 
 void timer1StopSpin() {
-  TIMSK1 &= ~(1 << OCIE1A);
   TCCR1A &= ~(1 << COM1A0);  // disconnect OC1A, hand the pin back to plain digital I/O
   TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10));
   digitalWrite(MOTOR1_STEP_PIN, LOW);
-  noInterrupts();
-  long finalPos = spinStepPos;
-  interrupts();
-  motor1.setCurrentPosition(finalPos);  // keep AccelStepper's position in sync for ROTATE/HOME/STATUS afterward
+  updateSpinPosition(true);  // flush the last partial integration interval
+  motor1.setCurrentPosition(spinStepPos);  // keep AccelStepper's position in sync for ROTATE/HOME/STATUS afterward
 }
 
 // Returns Motor 1's logical position regardless of which path is driving it.
 long motor1Position() {
-  if (!spinningHW) return motor1.currentPosition();
-  noInterrupts();
-  long pos = spinStepPos;
-  interrupts();
-  return pos;
+  return spinningHW ? spinStepPos : motor1.currentPosition();
+}
+
+// Integrates step position from the commanded frequency. Called every loop
+// while spinningHW; ~200Hz update rate is plenty for the POS display.
+void updateSpinPosition(bool force) {
+  unsigned long now = micros();
+  float dt = (now - spinPosLastMicros) / 1.0e6f;
+  if (!force && dt < 0.005f) return;
+  spinPosLastMicros = now;
+  spinStepFrac += spinCurrentFreq * dt;
+  long whole = (long)spinStepFrac;
+  spinStepFrac -= whole;
+  spinStepPos += spinDirection * whole;
 }
 
 // Walks the timer's frequency from 0 up to spinTargetFreq at motor1AccelSetting
@@ -192,7 +212,7 @@ void updateSpinRamp() {
   if (spinCurrentFreq >= spinTargetFreq) return;
   unsigned long now = millis();
   float elapsedSec = (now - spinRampLastMillis) / 1000.0f;
-  if (elapsedSec < 0.01f) return;  // throttle register writes to ~100Hz during the ramp
+  if (elapsedSec < 0.002f) return;  // throttle register writes to ~500Hz during the ramp — small, smooth frequency increments
   spinRampLastMillis = now;
 
   float freq = spinCurrentFreq + motor1AccelSetting * elapsedSec;
@@ -227,7 +247,7 @@ void loop() {
   checkWatchdog();
 
   if (!faultActive) {
-    if (spinningHW) updateSpinRamp();
+    if (spinningHW) { updateSpinRamp(); updateSpinPosition(false); }
     else motor1.run();
     motor2.run();
   }
