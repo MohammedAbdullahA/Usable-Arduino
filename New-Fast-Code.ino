@@ -10,15 +10,19 @@
  * below at the point it's implemented.
  *
  * Wiring:
- *   Motor 2 (rotation, DM860H)  step=D9  dir=D3
- *   Motor 1 (linear)            step=D4  dir=D5
- *   Limit switch, linear MIN    D6  (to GND when triggered, INPUT_PULLUP)
- *   Limit switch, linear MAX    D7  (to GND when triggered, INPUT_PULLUP)
+ *   Motor 1 (back-and-forth, DM860H)  step=D9  dir=D3
+ *     Continuously-rotating shaft drives a worm screw that advances the
+ *     jig along its track — the motor spins, but the jig moves linearly.
+ *     Controlled via SPIN (continuous, by RPM) or ROTATE (fixed angle).
+ *   Motor 2 (rotary — intended to spin the product) step=D4  dir=D5
+ *     Not currently connected to a motor. Controlled via ROTARY/HOME.
+ *   Limit switch, Motor 2 axis MIN    D6  (to GND when triggered, INPUT_PULLUP)
+ *   Limit switch, Motor 2 axis MAX    D7  (to GND when triggered, INPUT_PULLUP)
  *
  * Note on limit switch pins: D6/D7 are used instead of true external
  * interrupts, via AVR pin-change interrupts (PCINT2) — see PCINT2_vect below.
  *
- * Motor 2 STEP is on D9 (Timer1's OC1A) rather than a plain digital pin.
+ * Motor 1 STEP is on D9 (Timer1's OC1A) rather than a plain digital pin.
  * ROTATE/HOME still drive it through AccelStepper's normal digitalWrite-based
  * stepping (fine for the speeds those need). SPIN instead hands the pin to
  * Timer1 hardware waveform generation: AccelStepper's polling-loop stepping
@@ -36,7 +40,7 @@
  *
  * STOP decelerates the spin to zero rather than cutting instantly (an
  * instant cut at high RPM regenerates a damaging bus-voltage spike — see
- * cmdStop). Its rate (spinStopDecelSetting, SET_STOP_DECEL_2) is deliberately
+ * cmdStop). Its rate (spinStopDecelSetting, SET_STOP_DECEL_1) is deliberately
  * separate from and much faster than the normal accel setting: a decel at
  * accel's rate can take ~1s and cover enough real rotation/travel to
  * overshoot a mechanical limit on a mounted rig. ESTOP remains an instant
@@ -49,10 +53,10 @@
 #include <math.h>
 
 // ─── Pins ────────────────────────────────────────────────────────────────
-const uint8_t MOTOR2_STEP_PIN = 9;  // Timer1 OC1A — required for hardware-driven SPIN
-const uint8_t MOTOR2_DIR_PIN  = 3;
-const uint8_t MOTOR1_STEP_PIN = 4;
-const uint8_t MOTOR1_DIR_PIN  = 5;
+const uint8_t MOTOR1_STEP_PIN = 9;  // Timer1 OC1A — required for hardware-driven SPIN
+const uint8_t MOTOR1_DIR_PIN  = 3;
+const uint8_t MOTOR2_STEP_PIN = 4;
+const uint8_t MOTOR2_DIR_PIN  = 5;
 const uint8_t LIMIT_MIN_PIN   = 6;
 const uint8_t LIMIT_MAX_PIN   = 7;
 
@@ -67,16 +71,16 @@ const uint8_t LIMIT_MAX_PIN   = 7;
 const float STEPS_PER_REV        = 1600.0f;
 // Speed/accel values below are in steps (microsteps), so they're scaled x4
 // along with STEPS_PER_REV to keep the physical RPM / rev/s^2 unchanged.
-const float MOTOR2_MAX_SPEED_DEF = 1200.0f;
-const float MOTOR2_ACCEL_DEF     = 80000.0f;  // = ACCEL_MAX — ramps through any resonance band as fast as possible by default
-const float MOTOR1_MAX_SPEED_DEF = 3000.0f;
-const float MOTOR1_ACCEL_DEF     = 1500.0f;
+const float MOTOR1_MAX_SPEED_DEF = 1200.0f;
+const float MOTOR1_ACCEL_DEF     = 80000.0f;  // = ACCEL_MAX — ramps through any resonance band as fast as possible by default
+const float MOTOR2_MAX_SPEED_DEF = 3000.0f;
+const float MOTOR2_ACCEL_DEF     = 1500.0f;
 
 // ─── Parameter validation limits ───────────────────────────────────────────
 const float ROTATE_DEG_MIN   = -3600.0f;
 const float ROTATE_DEG_MAX   =  3600.0f;
-const long  LINEAR_STEPS_MIN = -100000L;
-const long  LINEAR_STEPS_MAX =  100000L;
+const long  ROTARY_STEPS_MIN = -100000L;
+const long  ROTARY_STEPS_MAX =  100000L;
 // SPEED_MAX no longer reflects a real safety ceiling — it's set high enough
 // that 3000 RPM (the manufacturer spec, 160000 steps/s at 3200 steps/rev)
 // clears validation. AccelStepper on an Uno is software-timed, though: its
@@ -87,9 +91,9 @@ const float SPEED_MAX        = 200000.0f;
 const float ACCEL_MAX        = 80000.0f;  // scaled x4 with STEPS_PER_REV (same physical rev/s^2 ceiling as before)
 // STOP must decelerate much faster than a normal start ramps up — a full
 // accel-rate ramp-down from cruise speed covers real physical travel (at
-// MOTOR2_ACCEL_DEF that's roughly a full second, which can be enough
+// MOTOR1_ACCEL_DEF that's roughly a full second, which can be enough
 // rotation/travel to overshoot a mechanical limit on a mounted rig). This is
-// deliberately separate from motor2AccelSetting so STOP stays fast even if
+// deliberately separate from motor1AccelSetting so STOP stays fast even if
 // accel is tuned low for gentle starts.
 const float STOP_DECEL_MAX     = 400000.0f;
 const float STOP_DECEL_DEFAULT = 400000.0f;  // ~0.2s from 3000 RPM (1600 ppr) — smooth enough to avoid a regen spike, fast enough to stay within mechanical limits
@@ -99,18 +103,18 @@ const unsigned long WATCHDOG_TIMEOUT_MS     = 5000;
 const unsigned long POS_BROADCAST_INTERVAL  = 250;
 const size_t        CMD_BUFFER_SIZE         = 64;
 
-AccelStepper motor2(AccelStepper::DRIVER, MOTOR2_STEP_PIN, MOTOR2_DIR_PIN);
 AccelStepper motor1(AccelStepper::DRIVER, MOTOR1_STEP_PIN, MOTOR1_DIR_PIN);
+AccelStepper motor2(AccelStepper::DRIVER, MOTOR2_STEP_PIN, MOTOR2_DIR_PIN);
 
 // ─── State ──────────────────────────────────────────────────────────────
 bool busy = false;            // a motion command is in progress (global — the rig moves one axis at a time, matching the original sequence)
-bool movingMotor2 = false;
 bool movingMotor1 = false;
+bool movingMotor2 = false;
 bool faultActive = false;     // set by a limit switch or watchdog trip; requires CLEAR to resume
 unsigned long lastCommandMillis = 0;
 unsigned long lastBroadcastMillis = 0;
-float motor2AccelSetting = MOTOR2_ACCEL_DEF;  // mirrors motor2's AccelStepper accel so the hardware SPIN ramp can use the same value
-float spinStopDecelSetting = STOP_DECEL_DEFAULT;  // used only for STOP's ramp-down — deliberately independent of accel, see SET_STOP_DECEL_2
+float motor1AccelSetting = MOTOR1_ACCEL_DEF;  // mirrors motor1's AccelStepper accel so the hardware SPIN ramp can use the same value
+float spinStopDecelSetting = STOP_DECEL_DEFAULT;  // used only for STOP's ramp-down — deliberately independent of accel, see SET_STOP_DECEL_1
 
 char cmdBuffer[CMD_BUFFER_SIZE];
 uint8_t bufIndex = 0;
@@ -128,7 +132,7 @@ long  spinStepPos   = 0;         // integrated step position while spinningHW
 float spinStepFrac  = 0;         // fractional-step remainder of the integrator
 unsigned long spinPosLastMicros = 0;
 int8_t  spinDirection  = 0;      // +1 or -1 for the duration of the current spin
-bool    spinningHW     = false;  // true while Timer1 (not AccelStepper) is driving Motor 2
+bool    spinningHW     = false;  // true while Timer1 (not AccelStepper) is driving Motor 1
 bool    spinStoppingSoft = false; // true while a STOP is ramping the spin down to zero
 float   spinTargetFreq = 0;      // Hz the ramp is walking toward
 float   spinCurrentFreq = 0;     // Hz currently loaded into the timer
@@ -186,9 +190,9 @@ void timer1SetFrequency(float freqHz) {
 }
 
 void timer1StartSpin(float freqHz) {
-  pinMode(MOTOR2_STEP_PIN, OUTPUT);
-  digitalWrite(MOTOR2_STEP_PIN, LOW);
-  spinStepPos = motor2.currentPosition();  // continue counting from wherever AccelStepper left off
+  pinMode(MOTOR1_STEP_PIN, OUTPUT);
+  digitalWrite(MOTOR1_STEP_PIN, LOW);
+  spinStepPos = motor1.currentPosition();  // continue counting from wherever AccelStepper left off
   spinStepFrac = 0;
   spinPosLastMicros = micros();
   TCNT1 = 0;
@@ -199,14 +203,14 @@ void timer1StartSpin(float freqHz) {
 void timer1StopSpin() {
   TCCR1A &= ~(1 << COM1A0);  // disconnect OC1A, hand the pin back to plain digital I/O
   TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10));
-  digitalWrite(MOTOR2_STEP_PIN, LOW);
+  digitalWrite(MOTOR1_STEP_PIN, LOW);
   updateSpinPosition(true);  // flush the last partial integration interval
-  motor2.setCurrentPosition(spinStepPos);  // keep AccelStepper's position in sync for ROTATE/HOME/STATUS afterward
+  motor1.setCurrentPosition(spinStepPos);  // keep AccelStepper's position in sync for ROTATE/HOME/STATUS afterward
 }
 
-// Returns Motor 2's logical position regardless of which path is driving it.
-long motor2Position() {
-  return spinningHW ? spinStepPos : motor2.currentPosition();
+// Returns Motor 1's logical position regardless of which path is driving it.
+long motor1Position() {
+  return spinningHW ? spinStepPos : motor1.currentPosition();
 }
 
 // Integrates step position from the commanded frequency. Called every loop
@@ -222,7 +226,7 @@ void updateSpinPosition(bool force) {
   spinStepPos += spinDirection * whole;
 }
 
-// Walks the timer's frequency toward spinTargetFreq at motor2AccelSetting
+// Walks the timer's frequency toward spinTargetFreq at motor1AccelSetting
 // (Hz/s) — up when starting a SPIN, down when a soft STOP set the target to 0.
 // The ramp-down matters for hardware safety: cutting an 80kHz pulse train
 // instantly turns a 3000RPM rotor into a generator dumping its stored energy
@@ -238,7 +242,7 @@ void updateSpinRamp() {
 
   float freq;
   if (spinCurrentFreq < spinTargetFreq) {
-    freq = spinCurrentFreq + motor2AccelSetting * elapsedSec;
+    freq = spinCurrentFreq + motor1AccelSetting * elapsedSec;
     if (freq > spinTargetFreq) freq = spinTargetFreq;
   } else {
     freq = spinCurrentFreq - spinStopDecelSetting * elapsedSec;
@@ -252,7 +256,7 @@ void updateSpinRamp() {
     spinningHW = false;
     spinStoppingSoft = false;
     busy = false;
-    movingMotor2 = false;
+    movingMotor1 = false;
     Serial.println(F("DONE STOP"));
     return;
   }
@@ -264,13 +268,13 @@ void setup() {
   Serial.begin(9600);
   while (!Serial && millis() < 3000) { }
 
-  motor2.setMaxSpeed(MOTOR2_MAX_SPEED_DEF);
-  motor2.setAcceleration(MOTOR2_ACCEL_DEF);
-  motor2.setCurrentPosition(0);
-
   motor1.setMaxSpeed(MOTOR1_MAX_SPEED_DEF);
   motor1.setAcceleration(MOTOR1_ACCEL_DEF);
   motor1.setCurrentPosition(0);
+
+  motor2.setMaxSpeed(MOTOR2_MAX_SPEED_DEF);
+  motor2.setAcceleration(MOTOR2_ACCEL_DEF);
+  motor2.setCurrentPosition(0);
 
   setupLimitInterrupts();
 
@@ -286,8 +290,8 @@ void loop() {
 
   if (!faultActive) {
     if (spinningHW) { updateSpinRamp(); updateSpinPosition(false); }
-    else motor2.run();
-    motor1.run();
+    else motor1.run();
+    motor2.run();
   }
 
   handleMotionCompletion();
@@ -368,20 +372,20 @@ void processCommand(char* line) {
     cmdRotate(argStr);
   } else if (strcmp(command, "SPIN") == 0) {
     cmdSpin(argStr);
-  } else if (strcmp(command, "LINEAR") == 0) {
-    cmdLinear(argStr);
+  } else if (strcmp(command, "ROTARY") == 0) {
+    cmdRotary(argStr);
   } else if (strcmp(command, "HOME") == 0) {
     cmdHome();
   } else if (strcmp(command, "SET_SPEED_1") == 0) {
-    cmdSetSpeed(motor2, argStr);
-  } else if (strcmp(command, "SET_SPEED_2") == 0) {
     cmdSetSpeed(motor1, argStr);
+  } else if (strcmp(command, "SET_SPEED_2") == 0) {
+    cmdSetSpeed(motor2, argStr);
   } else if (strcmp(command, "SET_ACCEL_1") == 0) {
-    cmdSetAccel(motor2, argStr);
-  } else if (strcmp(command, "SET_STOP_DECEL_2") == 0) {
+    cmdSetAccel(motor1, argStr);
+  } else if (strcmp(command, "SET_STOP_DECEL_1") == 0) {
     cmdSetStopDecel(argStr);
   } else if (strcmp(command, "SET_ACCEL_2") == 0) {
-    cmdSetAccel(motor1, argStr);
+    cmdSetAccel(motor2, argStr);
   } else {
     Serial.println(F("ERROR UNKNOWN_COMMAND"));
   }
@@ -431,19 +435,20 @@ void cmdRotate(char* argStr) {
   }
 
   long steps = lround((double)degrees * STEPS_PER_REV / 360.0);
-  motor2.move(steps);
+  motor1.move(steps);
   busy = true;
-  movingMotor2 = true;
-  movingMotor1 = false;
+  movingMotor1 = true;
+  movingMotor2 = false;
 
   Serial.print(F("OK "));
   Serial.println(lastCommandText);
 }
 
 void cmdSpin(char* argStr) {
-  // Addition beyond the original spec: continuous RPM-driven rotation for
-  // Motor 2, as an alternative to ROTATE's fixed-angle moves. Drives D9
-  // directly from Timer1 hardware (see timer1StartSpin) instead of through
+  // Addition beyond the original spec: continuous RPM-driven spin of
+  // Motor 1's shaft, as an alternative to ROTATE's fixed-angle moves —
+  // this shaft drives the worm screw that advances the jig (see wiring
+  // note at top of file). Drives D9 directly from Timer1 hardware (see timer1StartSpin) instead of through
   // AccelStepper's polling loop, since the loop's real achievable pulse rate
   // tops out far below what's needed to approach the motor's rated speed.
   if (faultActive) { Serial.println(F("ERROR FAULT_ACTIVE")); return; }
@@ -472,7 +477,7 @@ void cmdSpin(char* argStr) {
   }
 
   spinDirection = (rpm > 0) ? 1 : -1;
-  digitalWrite(MOTOR2_DIR_PIN, rpm > 0 ? HIGH : LOW);
+  digitalWrite(MOTOR1_DIR_PIN, rpm > 0 ? HIGH : LOW);
 
   spinTargetFreq = freq;
   spinCurrentFreq = 1.0f;  // start near zero rather than jumping straight to cruise speed
@@ -482,14 +487,14 @@ void cmdSpin(char* argStr) {
   timer1StartSpin(spinCurrentFreq);
 
   busy = true;
-  movingMotor2 = true;
-  movingMotor1 = false;
+  movingMotor1 = true;
+  movingMotor2 = false;
 
   Serial.print(F("OK "));
   Serial.println(lastCommandText);
 }
 
-void cmdLinear(char* argStr) {
+void cmdRotary(char* argStr) {
   if (faultActive) { Serial.println(F("ERROR FAULT_ACTIVE")); return; }
   if (busy)         { Serial.println(F("BUSY")); return; }
 
@@ -498,15 +503,15 @@ void cmdLinear(char* argStr) {
     Serial.println(F("ERROR INVALID_PARAM"));
     return;
   }
-  if (steps < LINEAR_STEPS_MIN || steps > LINEAR_STEPS_MAX) {
+  if (steps < ROTARY_STEPS_MIN || steps > ROTARY_STEPS_MAX) {
     Serial.println(F("ERROR OUT_OF_RANGE"));
     return;
   }
 
-  motor1.move(steps);
+  motor2.move(steps);
   busy = true;
-  movingMotor2 = false;
-  movingMotor1 = true;
+  movingMotor1 = false;
+  movingMotor2 = true;
 
   Serial.print(F("OK "));
   Serial.println(lastCommandText);
@@ -516,16 +521,16 @@ void cmdHome() {
   if (faultActive) { Serial.println(F("ERROR FAULT_ACTIVE")); return; }
   if (busy)         { Serial.println(F("BUSY")); return; }
 
-  movingMotor2 = motor2.currentPosition() != 0;
   movingMotor1 = motor1.currentPosition() != 0;
+  movingMotor2 = motor2.currentPosition() != 0;
 
-  if (!movingMotor2 && !movingMotor1) {
+  if (!movingMotor1 && !movingMotor2) {
     Serial.println(F("DONE HOME"));
     return;
   }
 
-  motor2.moveTo(0);
   motor1.moveTo(0);
+  motor2.moveTo(0);
   busy = true;
 
   Serial.println(F("OK HOME"));
@@ -581,7 +586,7 @@ void cmdSetAccel(AccelStepper& motor, char* argStr) {
   }
 
   motor.setAcceleration(value);
-  if (&motor == &motor2) motor2AccelSetting = value;  // keeps the hardware SPIN ramp in sync
+  if (&motor == &motor1) motor1AccelSetting = value;  // keeps the hardware SPIN ramp in sync
   Serial.print(F("OK "));
   Serial.println(lastCommandText);
 }
@@ -595,14 +600,14 @@ void emergencyHalt() {
     spinningHW = false;
   }
   spinStoppingSoft = false;
-  motor2.setSpeed(0);
-  motor2.moveTo(motor2.currentPosition());
   motor1.setSpeed(0);
   motor1.moveTo(motor1.currentPosition());
+  motor2.setSpeed(0);
+  motor2.moveTo(motor2.currentPosition());
 
   busy = false;
-  movingMotor2 = false;
   movingMotor1 = false;
+  movingMotor2 = false;
 }
 
 void checkLimitSwitches() {
@@ -627,13 +632,13 @@ void handleMotionCompletion() {
   if (!busy) return;
   if (spinningHW) return;  // hardware SPIN never completes on its own — only STOP ends it
 
-  bool m2Done = !movingMotor2 || motor2.distanceToGo() == 0;
-  bool m1Done = !movingMotor1 || motor1.distanceToGo() == 0;
+  bool m2Done = !movingMotor1 || motor1.distanceToGo() == 0;
+  bool m1Done = !movingMotor2 || motor2.distanceToGo() == 0;
 
   if (m1Done && m2Done) {
     busy = false;
-    movingMotor2 = false;
     movingMotor1 = false;
+    movingMotor2 = false;
     Serial.print(F("DONE "));
     Serial.println(lastCommandText);
   }
@@ -642,9 +647,9 @@ void handleMotionCompletion() {
 void sendStatusLine() {
   const char* state = faultActive ? "FAULT" : (busy ? "MOVING" : "IDLE");
   Serial.print(F("POS "));
-  Serial.print(motor2Position());
+  Serial.print(motor1Position());
   Serial.print(' ');
-  Serial.print(motor1.currentPosition());
+  Serial.print(motor2.currentPosition());
   Serial.print(' ');
   Serial.println(state);
 }
